@@ -1,0 +1,131 @@
+name: df-hlm-8-claude-design-renderer
+version: 1
+
+execution:
+  weekly_wave: "wave-2"
+  weekly_report_prefix: "weekly-render-report"
+  auto_render_limit_per_week_default: 3
+  weekly_uc_sources:
+    - df-hlm-6-approval-tracker
+    - df-hlm-2
+    - df-hlm-3
+    - df-hlm-4
+
+constraints:
+  k11:
+    cascade_containment: true
+    failure_blast_radius: 1
+    dependency_dlq_separate: true
+  k12:
+    distillation_resistenz: true
+    provenance_required_in_output: true
+    non_llm_validation_layer: true
+    html_lint_engine: lxml
+  k13:
+    independent_ground_truth: true
+    external_anchor_type: claude_ai_design_api
+    pre_action_domain_check: true
+  k14:
+    human_override_decay: true
+    override_complexity: single_command
+    martin_review_cadence: weekly
+    stop_flag: STOP.flag
+    martin_approval_required_for_imke_email: true
+  k15:
+    entropy_budget: true
+    entropy_added_loc_estimate: 400
+    entropy_justified_by_rho: "EUR 90-120k/Jahr Claude-Design-Velocity (hoechster rho-Hebel)"
+  k16:
+    concurrent_spawn_mutex: true
+    lock_dir: /tmp/df-hlm-8.lock
+    engine_pgrep_check: true
+
+lose_coupling:
+  lc1:
+    graceful_degradation: true
+    modes:
+      - full
+      - degraded_chrome_mcp
+      - degraded_email_send
+      - standalone_local_html_only
+  lc2:
+    direct_mode_fallback: true
+    capability: 0.70
+    trigger: "Chrome-MCP unreachable >30s"
+  lc3:
+    circuit_breaker: true
+    timeout_s: 30
+    open_threshold: 3
+  lc4:
+    failure_isolation: true
+    state_externalization: true
+    idempotent: true
+    idempotency_key_basis:
+      - wave
+      - uc_id
+  lc5:
+    health_check_independence: true
+    health_check_dependencies: []
+
+env_gating:
+  df_hlm_8_real_chrome_mcp_enabled:
+    env_var: DF_HLM_8_REAL_CHROME_MCP_ENABLED
+    default: "false"
+    required_for_live_cloud_upload: true
+  df_hlm_8_real_email_send_enabled:
+    env_var: DF_HLM_8_REAL_EMAIL_SEND_ENABLED
+    default: "false"
+    required_for_live_email_send: true
+  phronesis_ticket:
+    env_var: PHRONESIS_TICKET
+    required_pattern: "PT-"
+    required_for_real_actions: true
+  auto_render_limit_per_week:
+    env_var: AUTO_RENDER_LIMIT_PER_WEEK
+    default: "3"
+
+templates:
+  brief: |
+    HeyLou Marketing Wave-2 Render Brief
+    UC-ID: {uc_id}
+    Wave: {wave}
+    Title: {title}
+    Objective: {objective}
+    Brand Voice: {brand_voice}
+    Sources: {source_dfs}
+    Notes: {notes}
+    Timestamp: {timestamp}
+  imke_email_subject: "HeyLou Weekly Claude-Design Render Update - {wave}"
+  imke_email_body: |
+    Hallo Imke,
+
+    anbei der Weekly Claude-Design Render Report fuer {wave}.
+    Claude-Design-URLs:
+    {cloud_urls}
+
+    Martin-Approval fuer Versand: ERFORDERLICH
+    Provenance:
+    {provenance}
+
+    Viele Gruesse
+    DF-HLM-8
+
+paths:
+  input_dirs:
+    - inputs/imke-feedback-cohort
+    - inputs/df-hlm-2
+    - inputs/df-hlm-3
+    - inputs/df-hlm-4
+  output_dir: output
+  state_json: output/state.json
+  cloud_url_list_json: output/cloud-url-list.json
+  report_markdown: output/weekly-render-report.md
+  audit_log: output/audit.log
+  email_drafts_dir: output/email-drafts
+  dlq_dir: output/dlq
+  branch_hub_render_root: branch-hub/df-output/df-hlm-8-claude-design
+  stop_flag: STOP.flag
+
+logging:
+  level: info
+  renderer: json
