@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -11,6 +12,16 @@ from pathlib import Path
 from string import Formatter
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _df_common.pii_scrubber import PIIScrubber, scrub_audit_payload
+from _df_common.welle_b2_patches import (
+    K13PreActionVerifier,
+    K16MutexGuard,
+    MOCK_PREFIX,
+    make_mock_url,
+    make_provenance_envelope,
+)
 
 try:
     import structlog
@@ -191,6 +202,7 @@ class ClaudeDesignRenderer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_path: Path = self.paths['state_json']
         self.input_dirs: list[Path] = self.paths['input_dirs']
+        self.pii_scrubber = PIIScrubber(enabled=True, kemmer_names_enabled=True)
         self.circuit_breaker = CircuitBreaker(
             timeout_s=self.config['lose_coupling']['lc3']['timeout_s'],
             open_threshold=self.config['lose_coupling']['lc3']['open_threshold'],
@@ -257,8 +269,24 @@ class ClaudeDesignRenderer:
             return {'artifacts': {}, 'runs': 0}
         return json.loads(self.state_path.read_text(encoding='utf-8'))
 
+    def _write_text_output(self, path: Path, content: str) -> None:
+        atomic_write_text(path, self.pii_scrubber.scrub(content))
+
+    def _write_json_output(self, path: Path, payload: Any) -> None:
+        scrubbed = self._scrub_payload(payload)
+        atomic_write_json(path, scrubbed)
+
+    def _scrub_payload(self, payload: Any) -> Any:
+        if isinstance(payload, dict):
+            return self.pii_scrubber.scrub_dict_recursive(payload)
+        if isinstance(payload, list):
+            return [self._scrub_payload(item) for item in payload]
+        if isinstance(payload, str):
+            return self.pii_scrubber.scrub(payload)
+        return payload
+
     def _save_state(self, state: dict[str, Any]) -> None:
-        atomic_write_json(self.state_path, state)
+        self._write_json_output(self.state_path, state)
 
     def pre_action_domain_check(self, target_url: str) -> None:
         if not self.config['constraints']['k13']['pre_action_domain_check']:
@@ -338,17 +366,30 @@ class ClaudeDesignRenderer:
         render_root: Path = self.paths['branch_hub_render_root'] / uc.wave
         html_path = render_root / f'{uc.uc_id}.html'
         zip_path = render_root / f'{uc.uc_id}.zip'
-        atomic_write_text(html_path, html_text)
+        html_text_scrubbed = self.pii_scrubber.scrub(html_text)
+        atomic_write_text(html_path, html_text_scrubbed)
         render_root.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(f'{uc.uc_id}.html', html_text)
+            archive.writestr(f'{uc.uc_id}.html', html_text_scrubbed)
         return html_path, zip_path
 
     def _mock_cloud_upload(self, uc: WeeklyUC) -> tuple[str, str]:
-        token = f"MOCK-{uc.wave}-{uc.uc_id}-{self.now_provider().strftime('%Y%m%d%H%M%S')}"
-        return f'https://claude.ai/design/{token}', token
+        token = f'{uc.wave}-{uc.uc_id}'
+        url = make_mock_url('https://claude.ai/design', token)
+        return url, url.rstrip('/').split('/')[-1]
+
+    def _verify_real_mode_pre_action(self) -> None:
+        verifier = K13PreActionVerifier(
+            expected_env_tag='dev',
+            expected_mount_pattern='/Users/make',
+            blast_radius_class='state-only',
+        )
+        result = verifier.verify()
+        if not result.ok:
+            raise RuntimeError(f'K13-VETO: {result.failed_check}')
 
     def _real_cloud_upload(self, brief_text: str) -> tuple[str, str]:
+        self._verify_real_mode_pre_action()
         self.pre_action_domain_check('https://claude.ai/design')
         ticket = self.phronesis_ticket()
         if not ticket or not ticket.startswith('PT-'):
@@ -374,7 +415,7 @@ class ClaudeDesignRenderer:
             for artifact in artifacts
         ]
         path: Path = self.paths['cloud_url_list_json']
-        atomic_write_json(path, payload)
+        self._write_json_output(path, payload)
         return path
 
     def _write_report(self, summary: RenderSummary) -> Path:
@@ -399,7 +440,7 @@ class ClaudeDesignRenderer:
             for failure in summary.failures:
                 lines.append(f"- {failure['uc_id']}: {failure['error']}")
         path: Path = self.paths['report_markdown']
-        atomic_write_text(path, '\n'.join(lines) + '\n')
+        self._write_text_output(path, '\n'.join(lines) + '\n')
         return path
 
     def _write_email_draft(self, summary: RenderSummary) -> Path:
@@ -417,17 +458,19 @@ class ClaudeDesignRenderer:
             'SEND_ALLOWED: false\n\n'
             f'{body}\n'
         )
-        atomic_write_text(draft_path, content)
+        self._write_text_output(draft_path, content)
         return draft_path
 
     def _append_audit(self, event: str, **fields: Any) -> None:
-        self.logger.info(event, **fields)
+        entry_scrubbed = scrub_audit_payload({'event': event, **fields})
+        event_scrubbed = str(entry_scrubbed.pop('event'))
+        self.logger.info(event_scrubbed, **entry_scrubbed)
         if self._audit_handle is not None:
             self._audit_handle.flush()
 
     def _dlq_write(self, uc: WeeklyUC, error: Exception) -> None:
         dlq_path: Path = self.paths['dlq_dir'] / uc.wave / f'{uc.uc_id}.json'
-        atomic_write_json(
+        self._write_json_output(
             dlq_path,
             {
                 'uc_id': uc.uc_id,
@@ -443,9 +486,11 @@ class ClaudeDesignRenderer:
             raise RuntimeError('K14 STOP.flag active')
         state = self._load_state()
         summary = RenderSummary(wave=self.config['execution']['weekly_wave'], mode=self.resolve_mode())
+        if self.env_gate('df_hlm_8_real_chrome_mcp_enabled'):
+            self._verify_real_mode_pre_action()
         weekly_ucs = self.detect_weekly_ucs()
         limited_ucs = weekly_ucs[: self.auto_render_limit()]
-        with MutexGuard(Path(self.config['constraints']['k16']['lock_dir'])):
+        with K16MutexGuard(lock_dir='/tmp/df-hlm-8.lock', df_engine_marker='claude_design_renderer.py'):
             self._append_audit('run_started', mode=summary.mode, candidate_count=len(weekly_ucs))
             for uc in limited_ucs:
                 key = f'{uc.wave}:{uc.uc_id}'
@@ -472,6 +517,19 @@ class ClaudeDesignRenderer:
                             raise
                     else:
                         cloud_url, artifact_id = self._mock_cloud_upload(uc)
+                    timestamp = self.now_provider().isoformat()
+                    is_mock = artifact_id is not None and artifact_id.startswith(MOCK_PREFIX)
+                    provenance = make_provenance_envelope(
+                        df_id='DF-HLM-8',
+                        timestamp_iso=timestamp,
+                        is_mock=is_mock,
+                        activation_gate_id=None if is_mock else self.phronesis_ticket(),
+                    ) | {
+                        'cloud_url': cloud_url,
+                        'artifact_id': artifact_id,
+                        'timestamp': timestamp,
+                        'source_dfs': uc.source_dfs,
+                    }
                     artifact = RenderArtifact(
                         uc_id=uc.uc_id,
                         wave=uc.wave,
@@ -480,14 +538,9 @@ class ClaudeDesignRenderer:
                         zip_backup_path=str(zip_backup_path),
                         cloud_url=cloud_url,
                         artifact_id=artifact_id,
-                        timestamp=self.now_provider().isoformat(),
+                        timestamp=timestamp,
                         source_dfs=uc.source_dfs,
-                        provenance={
-                            'cloud_url': cloud_url,
-                            'artifact_id': artifact_id,
-                            'timestamp': self.now_provider().isoformat(),
-                            'source_dfs': uc.source_dfs,
-                        },
+                        provenance=provenance,
                     )
                     state['artifacts'][key] = asdict(artifact)
                     summary.artifacts.append(artifact)
@@ -498,11 +551,15 @@ class ClaudeDesignRenderer:
                     self._append_audit('uc_failed', uc_id=uc.uc_id, error=str(exc))
             state['runs'] = state.get('runs', 0) + 1
             self._save_state(state)
+            run_complete_event = 'mock_run_complete' if any(
+                artifact.artifact_id and artifact.artifact_id.startswith(MOCK_PREFIX)
+                for artifact in summary.artifacts
+            ) else 'run_complete'
         summary.cloud_url_list_path = str(self._write_cloud_url_list(summary.artifacts))
         summary.report_path = str(self._write_report(summary))
         summary.email_draft_path = str(self._write_email_draft(summary))
         self._append_audit(
-            'run_completed',
+            run_complete_event,
             mode=summary.mode,
             rendered=len(summary.artifacts),
             failed=len(summary.failures),

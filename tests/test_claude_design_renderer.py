@@ -214,7 +214,9 @@ def test_imke_email_draft_martin_approval_required(tmp_path: Path) -> None:
     _seed_inputs(tmp_path, _approved_uc())
     summary = renderer.run()
     draft = Path(summary.email_draft_path).read_text(encoding='utf-8')
-    assert 'MARTIN_APPROVAL_REQUIRED: true' in draft
+    assert 'APPROVAL_REQUIRED: true' in draft
+    assert 'Martin' not in draft
+    assert 'Imke' not in draft
     assert 'SEND_ALLOWED: false' in draft
 
 
@@ -252,3 +254,67 @@ def test_audit_log_appended_per_run(tmp_path: Path) -> None:
     renderer.run()
     log_lines = (tmp_path / 'output' / 'audit.log').read_text(encoding='utf-8').strip().splitlines()
     assert len(log_lines) >= 4
+
+
+def test_pii_scrubbed_in_output_with_kemmer_name(tmp_path: Path) -> None:
+    """Output enthaelt keinen Kemmer-Familien-Namen."""
+    renderer = _make_renderer(tmp_path)
+    _seed_inputs(
+        tmp_path,
+        _approved_uc(
+            title='Martin Brand Voice Cloud',
+            objective='Generate visuals for Imke',
+            notes='Use Martin and Imke feedback',
+        ),
+    )
+    summary = renderer.run()
+    html_text = Path(summary.artifacts[0].local_html_path).read_text(encoding='utf-8')
+    report_text = Path(summary.report_path).read_text(encoding='utf-8')
+    assert 'Martin' not in html_text
+    assert 'Imke' not in html_text
+    assert 'Martin' not in report_text
+    assert 'Imke' not in report_text
+
+
+def test_k13_pre_action_verification_env_tag_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real-Mode mit falschem env_tag wird geblockt."""
+    monkeypatch.setenv('DF_ENV_TAG', 'prod')
+    renderer = _make_renderer(
+        tmp_path,
+        env={
+            'DF_HLM_8_REAL_CHROME_MCP_ENABLED': 'true',
+            'PHRONESIS_TICKET': 'PT-2026-XX-999',
+        },
+        chrome_uploader=lambda _brief: 'https://claude.ai/design/ART-001',
+    )
+    _seed_inputs(tmp_path, _approved_uc())
+    with pytest.raises(RuntimeError) as exc_info:
+        renderer.run()
+    assert 'K13' in str(exc_info.value)
+
+
+def test_mock_provenance_explicit_in_output(tmp_path: Path) -> None:
+    """Mock-Outputs haben 'mode': 'mock' in Provenance."""
+    renderer = _make_renderer(tmp_path)
+    _seed_inputs(tmp_path, _approved_uc())
+    summary = renderer.run()
+    artifact = summary.artifacts[0]
+    assert artifact.provenance['mode'] == 'mock'
+    cloud_url_list = json.loads(Path(summary.cloud_url_list_path).read_text(encoding='utf-8'))
+    assert cloud_url_list[0]['provenance']['mode'] == 'mock'
+    assert cloud_url_list[0]['cloud_url'].startswith('https://claude.ai/design/MOCK-')
+
+
+def test_k16_mutex_blocks_concurrent_spawn(tmp_path: Path) -> None:
+    """Concurrent Engine-Spawn wird geblockt."""
+    renderer = _make_renderer(tmp_path)
+    _seed_inputs(tmp_path, _approved_uc())
+    lock_dir = Path('/tmp/df-hlm-8.lock')
+    lock_dir.mkdir(exist_ok=True)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            renderer.run()
+        assert 'K16-VETO' in str(exc_info.value)
+    finally:
+        if lock_dir.exists():
+            lock_dir.rmdir()
