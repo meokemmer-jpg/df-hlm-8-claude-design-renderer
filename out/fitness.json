@@ -1,0 +1,8 @@
+{
+  "df": "df-hlm-8-claude-design-renderer",
+  "ts": "2026-06-05T14:12:08.821669+00:00",
+  "ok": true,
+  "bytes": 2848,
+  "model": "qwen2.5:14b-instruct",
+  "duration_s": 60.1
+}
