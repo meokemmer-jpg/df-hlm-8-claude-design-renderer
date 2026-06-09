@@ -1,0 +1,12 @@
+{
+  "df": "df-hlm-8-claude-design-renderer",
+  "ts": "2026-06-08T19:54:27.842455+00:00",
+  "has_src": true,
+  "parse_ok": true,
+  "has_tests": true,
+  "test_ran": true,
+  "tests_passed": true,
+  "code_hash": "a020a48f6dd919ae",
+  "python": "3.14.4",
+  "crux": "[CRUX-MK]"
+}
