@@ -1,9 +1,9 @@
 {
   "df": "df-hlm-8-claude-design-renderer",
-  "ts": "2026-07-06T06:50:59.730602+00:00",
+  "ts": "2026-07-07T00:53:58.587689+00:00",
   "maturity": "TESTED",
   "maturity_level": 4,
   "evidence_grade": 4,
-  "wargame_verdict": null,
+  "wargame_verdict": "CONDITIONAL",
   "crux": "[CRUX-MK]"
 }
